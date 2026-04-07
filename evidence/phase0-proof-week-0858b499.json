@@ -1,0 +1,11 @@
+{
+  "task_id": "0858b499-4e81-4a44-9bc9-a74852819431",
+  "operator_id": "b1e55ed-agent-28362",
+  "reward_pft": 3200.00,
+  "rewarded_at": "2026-04-07T19:35:00Z",
+  "verification_type": "url",
+  "verification_target": "https://github.com/P-U-C/pft-validator/blob/main/alpha/phase0-proof-week-2026-04-07.md",
+  "evidence_visibility": "public",
+  "evidence_checked_at": "2026-04-07T19:38:00Z",
+  "notes": "Phase 0 Proof Week: 17 new trades logged (14→31), stratification table, 4 benchmarks, 5 daily health checks. Verdict: Cannot falsify (zero high-confidence trades)."
+}
