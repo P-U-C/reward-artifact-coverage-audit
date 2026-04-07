@@ -73,8 +73,7 @@ export type AnomalyFlag =
   | 'ALL_PRIVATE'                  // Operator has 0% public evidence
   | 'LOW_COVERAGE_HIGH_VOLUME'     // Many tasks, low public coverage
   | 'CONCENTRATION_RISK'           // Single task > 50% of operator's rewards
-  | 'RECENT_DEGRADATION'           // Evidence coverage worse in recent period
-  | 'VERIFICATION_TYPE_MISMATCH'   // Verification type inconsistent with target
+  | 'DATA_QUALITY_RISK'            // Duplicate task IDs, malformed URLs, etc.
   | 'STALE_EVIDENCE_CHECK';        // Evidence not re-verified recently
 
 /**

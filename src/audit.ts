@@ -31,9 +31,11 @@ function isValidISODate(str: string): boolean {
   return !isNaN(new Date(str).getTime());
 }
 
-function validateInput(input: AuditInput, asOf: Date): Map<string, string[]> {
+function validateInput(input: AuditInput, asOf: Date): { warnings: Map<string, string[]>; malformedTaskIds: Set<string> } {
   const warnings = new Map<string, string[]>();
+  const malformedTaskIds = new Set<string>();
   const taskIds = new Set<string>();
+  const duplicateTaskIds = new Set<string>();
   
   const addWarning = (taskId: string, msg: string) => {
     if (!warnings.has(taskId)) warnings.set(taskId, []);
@@ -43,6 +45,7 @@ function validateInput(input: AuditInput, asOf: Date): Map<string, string[]> {
   for (const record of input.records) {
     if (taskIds.has(record.task_id)) {
       addWarning(record.task_id, `Duplicate task_id`);
+      duplicateTaskIds.add(record.task_id);
     }
     taskIds.add(record.task_id);
     
@@ -56,6 +59,7 @@ function validateInput(input: AuditInput, asOf: Date): Map<string, string[]> {
     
     if (record.verification_type === 'url' && !record.verification_target) {
       addWarning(record.task_id, `URL verification type but no target`);
+      malformedTaskIds.add(record.task_id);
     }
     
     if (record.verification_target && record.verification_type === 'url') {
@@ -63,11 +67,12 @@ function validateInput(input: AuditInput, asOf: Date): Map<string, string[]> {
         new URL(record.verification_target);
       } catch {
         addWarning(record.task_id, `Malformed URL: ${record.verification_target}`);
+        malformedTaskIds.add(record.task_id);
       }
     }
   }
   
-  return warnings;
+  return { warnings, malformedTaskIds };
 }
 
 // ============================================================================
@@ -79,7 +84,7 @@ function isPubliclyVerifiable(visibility: EvidenceVisibility): boolean {
 }
 
 function isUnverifiable(visibility: EvidenceVisibility): boolean {
-  return visibility === 'private' || visibility === 'missing' || visibility === 'malformed';
+  return visibility === 'private' || visibility === 'missing' || visibility === 'malformed' || visibility === 'expired';
 }
 
 function getTaskReasonCodes(
@@ -148,6 +153,7 @@ function aggregateByOperator(
   input: AuditInput,
   asOf: Date,
   warnings: Map<string, string[]>,
+  malformedTaskIds: Set<string>,
   thresholds: AuditThresholds
 ): Map<string, OperatorAggregates> {
   const operators = new Map<string, OperatorAggregates>();
@@ -174,10 +180,12 @@ function aggregateByOperator(
     op.tasks.push(record);
     op.total_pft += record.reward_pft;
     
-    // Classify by visibility
-    if (isPubliclyVerifiable(record.evidence_visibility)) {
+    // Classify by visibility (malformed URLs override declared visibility)
+    const effectiveVisibility = malformedTaskIds.has(record.task_id) ? 'malformed' : record.evidence_visibility;
+    
+    if (isPubliclyVerifiable(effectiveVisibility)) {
       op.publicly_verifiable_pft += record.reward_pft;
-    } else if (isUnverifiable(record.evidence_visibility)) {
+    } else {
       op.unverifiable_pft += record.reward_pft;
     }
     
@@ -194,13 +202,22 @@ function aggregateByOperator(
     op.by_verification_type.set(record.verification_type, typeEntry);
     
     // Check for flagged task
-    const reasonCodes = getTaskReasonCodes(record, asOf, thresholds);
+    let reasonCodes = getTaskReasonCodes(record, asOf, thresholds);
+    
+    // Add MALFORMED_TARGET for malformed URLs
+    if (malformedTaskIds.has(record.task_id)) {
+      if (!reasonCodes.includes('MALFORMED_TARGET')) {
+        reasonCodes.push('MALFORMED_TARGET');
+      }
+      reasonCodes = reasonCodes.filter(r => r !== 'OK');
+    }
+    
     if (!reasonCodes.includes('OK')) {
       op.flagged_tasks.push({
         task_id: record.task_id,
         reward_pft: record.reward_pft,
         verification_type: record.verification_type,
-        evidence_visibility: record.evidence_visibility,
+        evidence_visibility: malformedTaskIds.has(record.task_id) ? 'malformed' : record.evidence_visibility,
         reason_codes: reasonCodes,
       });
     }
@@ -220,7 +237,8 @@ function aggregateByOperator(
 function detectAnomalies(
   agg: OperatorAggregates,
   asOf: Date,
-  thresholds: AuditThresholds
+  thresholds: AuditThresholds,
+  dataQualityIssues: number
 ): AnomalyFlag[] {
   const flags: AnomalyFlag[] = [];
   
@@ -284,6 +302,11 @@ function detectAnomalies(
   });
   if (staleChecks.length > 0) {
     flags.push('STALE_EVIDENCE_CHECK');
+  }
+  
+  // DATA_QUALITY_RISK (duplicate task IDs, malformed URLs, etc.)
+  if (dataQualityIssues > 0) {
+    flags.push('DATA_QUALITY_RISK');
   }
   
   return flags;
@@ -367,9 +390,10 @@ function generateRationale(
 function generateOperatorResult(
   agg: OperatorAggregates,
   asOf: Date,
-  thresholds: AuditThresholds
+  thresholds: AuditThresholds,
+  dataQualityIssues: number
 ): OperatorAuditResult {
-  const anomalies = detectAnomalies(agg, asOf, thresholds);
+  const anomalies = detectAnomalies(agg, asOf, thresholds, dataQualityIssues);
   const priorityScore = calculatePriorityScore(agg, anomalies, thresholds);
   const priorityBand = getPriorityBand(priorityScore);
   const coverageRatio = agg.total_pft > 0 ? agg.publicly_verifiable_pft / agg.total_pft : 1;
@@ -443,15 +467,18 @@ export function auditEvidenceCoverage(
   const generatedAt = new Date();
   
   // Validate input
-  const warnings = validateInput(input, asOf);
+  const { warnings, malformedTaskIds } = validateInput(input, asOf);
   
   // Aggregate by operator
-  const operators = aggregateByOperator(input, asOf, warnings, thresholds);
+  const operators = aggregateByOperator(input, asOf, warnings, malformedTaskIds, thresholds);
   
   // Generate results
   const results: OperatorAuditResult[] = [];
   for (const agg of operators.values()) {
-    results.push(generateOperatorResult(agg, asOf, thresholds));
+    const dataQualityIssues = agg.warnings.filter(w => 
+      w.includes('Duplicate') || w.includes('Malformed') || w.includes('Invalid') || w.includes('no target') || w.includes('Negative')
+    ).length;
+    results.push(generateOperatorResult(agg, asOf, thresholds, dataQualityIssues));
   }
   
   // Sort: priority_score desc, unverifiable_pft desc, operator_id asc

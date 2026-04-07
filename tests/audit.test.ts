@@ -29,6 +29,7 @@ function makeRecord(overrides: Partial<RewardedTaskRecord> & { task_id: string; 
     reward_pft: 1000,
     rewarded_at: RECENT,
     verification_type: 'url',
+    verification_target: 'https://example.com/evidence',
     evidence_visibility: 'public',
     ...overrides,
   };
@@ -362,5 +363,87 @@ describe('Summary Statistics', () => {
     expect(result.summary.publicly_verifiable_pft).toBe(7000);
     expect(result.summary.unverifiable_pft).toBe(3000);
     expect(result.summary.overall_coverage_ratio).toBe(0.7);
+  });
+});
+
+// ============================================================================
+// Test 11: Integrity Edge Cases
+// ============================================================================
+
+describe('Integrity Edge Cases', () => {
+  it('treats malformed URL targets as unverifiable and reduces coverage', () => {
+    const input: AuditInput = {
+      records: [
+        makeRecord({
+          task_id: 't1',
+          operator_id: 'op1',
+          verification_type: 'url',
+          verification_target: 'not-a-valid-url',
+          evidence_visibility: 'public',
+          reward_pft: 5000,
+        }),
+      ],
+      as_of: NOW,
+    };
+
+    const result = auditEvidenceCoverage(input);
+
+    expect(result.operators[0].publicly_verifiable_pft).toBe(0);
+    expect(result.operators[0].unverifiable_pft).toBe(5000);
+    expect(result.operators[0].evidence_coverage_ratio).toBe(0);
+    expect(result.operators[0].flagged_tasks[0].reason_codes).toContain('MALFORMED_TARGET');
+  });
+
+  it('treats expired evidence as unverifiable and increases unverifiable_pft', () => {
+    const input: AuditInput = {
+      records: [
+        makeRecord({ task_id: 't1', operator_id: 'op1', evidence_visibility: 'expired', reward_pft: 5000 }),
+      ],
+      as_of: NOW,
+    };
+
+    const result = auditEvidenceCoverage(input);
+
+    expect(result.operators[0].publicly_verifiable_pft).toBe(0);
+    expect(result.operators[0].unverifiable_pft).toBe(5000);
+    expect(result.operators[0].flagged_tasks[0].reason_codes).toContain('EXPIRED_LINK');
+  });
+
+  it('treats url verification without target as malformed audit evidence', () => {
+    const input: AuditInput = {
+      records: [
+        makeRecord({
+          task_id: 't1',
+          operator_id: 'op1',
+          verification_type: 'url',
+          verification_target: undefined,
+          evidence_visibility: 'public',
+          reward_pft: 5000,
+        }),
+      ],
+      as_of: NOW,
+    };
+
+    const result = auditEvidenceCoverage(input);
+
+    expect(result.operators[0].validation_warnings.some(w => w.includes('no target'))).toBe(true);
+    expect(result.operators[0].unverifiable_pft).toBe(5000);
+    expect(result.operators[0].anomaly_flags).toContain('DATA_QUALITY_RISK');
+  });
+
+  it('escalates duplicate task IDs into audit severity, not just warnings', () => {
+    const input: AuditInput = {
+      records: [
+        makeRecord({ task_id: 'dupe', operator_id: 'op1', reward_pft: 5000 }),
+        makeRecord({ task_id: 'dupe', operator_id: 'op1', reward_pft: 5000 }),
+      ],
+      as_of: NOW,
+    };
+
+    const result = auditEvidenceCoverage(input);
+
+    expect(result.operators[0].validation_warnings.some(w => w.includes('Duplicate'))).toBe(true);
+    expect(result.operators[0].anomaly_flags).toContain('DATA_QUALITY_RISK');
+    expect(result.operators[0].priority_score).toBeGreaterThan(0);
   });
 });
